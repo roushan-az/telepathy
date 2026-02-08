@@ -22,25 +22,62 @@ function App() {
   const [token, setToken] = useState(null);
 
   /* -------------------- DUMMY USERS -------------------- */
-  const DUMMY_USERS = [
-    { id: "user-1", name: "Alice", online: true },
-    { id: "user-2", name: "Bob", online: true }
-  ];
+    const DEMO_USERS = {
+      alice: { id: "user-1", name: "Alice" },
+      bob: { id: "user-2", name: "Bob" }
+    };
 
-  const [currentUser] = useState(DUMMY_USERS[0]); // Alice
+    function getDemoUser() {
+      const params = new URLSearchParams(window.location.search);
+      const key = params.get("user") || "alice";
+      return DEMO_USERS[key] || DEMO_USERS.alice;
+    }
+
+   const [currentUser] = useState(getDemoUser());
 
   /* -------------------- CHATS -------------------- */
   const [chats, setChats] = useState([
     {
       id: "chat-1",
-      name: "Bob",
-      peerId: "user-2",
+      name: currentUser.id === "user-1" ? "Bob" : "Alice",
+      participants: ["user-1", "user-2"],
       online: true,
       messages: []
     }
   ]);
 
   const [selectedChat, setSelectedChat] = useState(chats[0]);
+
+  /* -------------------- broadcast & listen Message -------------------- */
+  function broadcastMessage(message) {
+    localStorage.setItem(
+      "demo-message",
+      JSON.stringify({ ...message, ts: Date.now() })
+    );
+  }
+
+  useEffect(() => {
+  const onStorage = (e) => {
+    if (e.key !== "demo-message" || !e.newValue) return;
+
+    const msg = JSON.parse(e.newValue);
+
+    // ignore own messages
+    if (msg.senderId === currentUser.id) return;
+
+    setChats(prev =>
+      prev.map(chat =>
+        chat.id === "chat-1"
+          ? { ...chat, messages: [...chat.messages, msg] }
+          : chat
+      )
+    );
+  };
+
+  window.addEventListener("storage", onStorage);
+  return () => window.removeEventListener("storage", onStorage);
+}, [currentUser.id]);
+
 
   /* -------------------- WebRTC -------------------- */
   const [localStream, setLocalStream] = useState(null);
@@ -98,33 +135,27 @@ function App() {
   }, [token]);
 
   /* -------------------- MESSAGING -------------------- */
-  const handleSendMessage = (text) => {
-    if (!selectedChat) return;
-
-    const message = {
-      id: crypto.randomUUID(),
-      senderId: currentUser.id,
-      content: text,
-      timestamp: new Date(),
-      status: "sent"
-    };
-
-    // Optimistic update
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === selectedChat.id
-          ? { ...chat, messages: [...chat.messages, message] }
-          : chat
-      )
-    );
-
-    // WebSocket
-    WebSocketService.send({
-      type: "MESSAGE",
-      to: selectedChat.peerId,
-      payload: message
-    });
+ const handleSendMessage = (text) => {
+  const message = {
+    id: crypto.randomUUID(),
+    senderId: currentUser.id,
+    content: text,
+    timestamp: new Date(),
+    status: "sent"
   };
+
+  // update local UI
+  setChats(prev =>
+    prev.map(chat =>
+      chat.id === "chat-1"
+        ? { ...chat, messages: [...chat.messages, message] }
+        : chat
+    )
+  );
+
+  // notify other tab
+  broadcastMessage(message);
+};
 
   const handleIncomingMessage = (msg) => {
     const incoming = {
@@ -237,6 +268,12 @@ const addChat = () => {
   setSelectedChat(newChat);
 };
 
+const handleCall = (type) => {
+  alert(
+    `${currentUser.name} started a ${type} call (demo mode)`
+  );
+};
+
 return (
   <div className="app-container">
     <div className="sidebar-wrapper">
@@ -255,6 +292,7 @@ return (
         messages={selectedChat?.messages || []}
         currentUser={currentUser}
         onSendMessage={handleSendMessage}
+        onCall={handleCall}
         inCall={inCall}          // ✅ FIXED
         startCall={startCall}    // ✅ FIXED
         endCall={endCall}        // ✅ FIXED

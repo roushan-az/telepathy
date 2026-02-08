@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import "./ChatWindow.css";
 
-function ChatWindow({ chat, messages = [], currentUser, onSendMessage }) {
+function ChatWindow({ chat, messages = [], currentUser, onSendMessage, onCall }) {
   const [messageInput, setMessageInput] = useState("");
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -98,10 +98,10 @@ function ChatWindow({ chat, messages = [], currentUser, onSendMessage }) {
         </div>
 
         <div className="chat-header-actions">
-          <button className="icon-button" title="Voice call">
+          <button className="icon-button" title="Voice call" onClick={() => onCall?.("audio")}>
             <Phone size={18} />
           </button>
-          <button className="icon-button" title="Video call">
+          <button className="icon-button" title="Video call"  onClick={() => onCall?.("video")}>
             <Video size={18} />
           </button>
           <button className="icon-button">
