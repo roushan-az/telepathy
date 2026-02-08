@@ -46,6 +46,7 @@ function App() {
   const [remoteStream, setRemoteStream] = useState(null);
   const [inCall, setInCall] = useState(false);
   const [dataOnlyMode, setDataOnlyMode] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(true);
 
   const wsConnectedRef = useRef(false);
   const handlersRegisteredRef = useRef(false);
@@ -499,13 +500,25 @@ function App() {
     }
   };
 
+  const handleSelectChat = (chat) => {
+    setSelectedChatId(chat.id);
+    // Hide sidebar on mobile when chat is selected
+    if (window.innerWidth <= 768) {
+      setShowSidebar(false);
+    }
+  };
+
+  const handleBackToChats = () => {
+    setShowSidebar(true);
+  };
+
   return (
     <div className="app-container">
-      <div className="sidebar-wrapper">
+      <div className={`sidebar-wrapper ${!showSidebar ? 'hidden' : ''}`}>
         <Sidebar
           chats={chats}
           selectedChat={selectedChat}
-          onSelectChat={(chat) => setSelectedChatId(chat.id)}
+          onSelectChat={handleSelectChat}
           onAddChat={addChat}
           currentUser={user}
         />
@@ -522,6 +535,8 @@ function App() {
           dataReady={dataReady}
           endCall={endCall}
           onInitiateDataConnection={initiateDataConnection}
+          onBack={handleBackToChats}
+          showBackButton={!showSidebar}
         />
       </div>
 

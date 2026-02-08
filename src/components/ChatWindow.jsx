@@ -9,7 +9,8 @@ import {
   Check,
   CheckCheck,
   Clock,
-  X
+  X,
+  ArrowLeft
 } from "lucide-react";
 import { sendFile, isDataChannelReady } from "../services/webrtc";
 import "./ChatWindow.css";
@@ -23,7 +24,9 @@ function ChatWindow({
   inCall, 
   dataReady,
   endCall,
-  onInitiateDataConnection 
+  onInitiateDataConnection,
+  onBack,
+  showBackButton = false
 }) {
   const [messageInput, setMessageInput] = useState("");
   const [dragging, setDragging] = useState(false);
@@ -217,6 +220,15 @@ function ChatWindow({
       {/* Header */}
       <div className="chat-header">
         <div className="chat-header-info">
+          {showBackButton && (
+            <button 
+              className="icon-button back-button" 
+              onClick={onBack}
+              title="Back to chats"
+            >
+              <ArrowLeft size={20} />
+            </button>
+          )}
           <div className={`avatar ${chat.online ? "online-indicator" : ""}`}>
             {getInitials(chat.name)}
           </div>
