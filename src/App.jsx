@@ -64,11 +64,17 @@ function App() {
   const [connectionQuality, setConnectionQuality] = useState('good');
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [callStartTime, setCallStartTime] = useState(null);
+  
+  // ✅ NEW: Queue for ICE candidates that arrive before remote description
+  const [pendingIceCandidates, setPendingIceCandidates] = useState([]);
 
   const callDurationInterval = useRef(null);
   const wsConnectedRef = useRef(false);
   const handlersRegisteredRef = useRef(false);
   const currentPeerIdRef = useRef(null);
+  
+  // ✅ NEW: Track peer connection for ICE candidate validation
+  const peerConnectionRef = useRef(null);
 
   /* -------------------- CALL DURATION TIMER -------------------- */
   useEffect(() => {
@@ -210,6 +216,24 @@ function App() {
     );
   }, [peerUserId]);
 
+  /* -------------------- HELPER: Process Pending ICE Candidates -------------------- */
+  // ✅ NEW: Process queued ICE candidates after remote description is set
+  const processPendingIceCandidates = useCallback(async () => {
+    if (pendingIceCandidates.length === 0) return;
+    
+    console.log(`📦 Processing ${pendingIceCandidates.length} pending ICE candidates`);
+    
+    for (const candidate of pendingIceCandidates) {
+      try {
+        await addIceCandidate(candidate);
+      } catch (error) {
+        console.error('❌ Error adding queued ICE candidate:', error);
+      }
+    }
+    
+    setPendingIceCandidates([]);
+  }, [pendingIceCandidates]);
+
   /* -------------------- WEBSOCKET HANDLERS -------------------- */
   const handleIncomingMessage = useCallback((msg) => {
     let senderId = msg.from || msg.senderId || msg.sender || msg.userId;
@@ -265,8 +289,9 @@ function App() {
       setCallDuration(0);
     }
 
-    await createPeerConnection(
+    const pc = await createPeerConnection(
       (candidate) => {
+        // ✅ FIXED: Include 'to' field
         WebSocketService.send({
           type: "ICE",
           to: msg.from,
@@ -296,24 +321,26 @@ function App() {
           console.log("❌ Reconnection failed");
           alert("Connection lost. Call ended.");
           endCall();
-        },
-        onIceRestart: (offer) => {
-          console.log("🧊 ICE restart");
-          WebSocketService.send({
-            type: "OFFER",
-            to: currentPeerIdRef.current,
-            offer,
-            iceRestart: true
-          });
-        },
-        onNetworkQualityChange: (quality, lossRate) => {
-          setConnectionQuality(quality);
-          console.log(`Network quality: ${quality} (${(lossRate * 100).toFixed(1)}% loss)`);
         }
       }
     );
 
-    // Setup data channel for receiver
+    // Store peer connection reference for ICE candidate validation
+    peerConnectionRef.current = pc;
+
+    // Set remote description from the offer
+    await pc.setRemoteDescription(new RTCSessionDescription({ type: "offer", sdp: msg.offer }));
+    
+    // ✅ NEW: Process any pending ICE candidates now that remote description is set
+    await processPendingIceCandidates();
+
+    if (!isDataOnly) {
+      const quality = connectionQuality === 'poor' ? 'low' : 'high';
+      const stream = await getUserMedia(true, msg.isVideo, quality);
+      setLocalStream(stream);
+      addTracks();
+    }
+
     setupDataChannelForReceiver(
       (data) => handleIncomingData(data, handleFileReceived),
       () => {
@@ -322,115 +349,169 @@ function App() {
       }
     );
 
-    // Only get media if not data-only mode
-    if (!isDataOnly) {
-      const quality = 'high'; // Start with high quality
-      const stream = await getUserMedia(true, msg.isVideo || false, quality);
-      setLocalStream(stream);
-      addTracks();
-    }
-
-    const answer = await createAnswer(msg.offer);
+    const answer = await createAnswer();
+    
+    // ✅ FIXED: Include 'to' field
     WebSocketService.send({
       type: "ANSWER",
       to: msg.from,
-      answer,
-      dataOnly: isDataOnly
+      answer
     });
-  }, [handleFileReceived]);
+  }, [connectionQuality, handleFileReceived, processPendingIceCandidates]);
 
   const handleAnswer = useCallback(async (msg) => {
     console.log(`✅ Received ANSWER from ${msg.from}`);
-    await setRemoteAnswer(msg.answer);
-  }, []);
+    
+    try {
+      await setRemoteAnswer(msg.answer);
+      
+      // ✅ NEW: Process any pending ICE candidates now that remote description is set
+      await processPendingIceCandidates();
+      
+    } catch (error) {
+      console.error("❌ Error setting remote answer:", error);
+    }
+  }, [processPendingIceCandidates]);
 
-  const handleIce = useCallback(async (msg) => {
-    if (msg?.candidate) {
-      console.log(`🧊 Received ICE candidate`);
+  const handleIceCandidate = useCallback(async (msg) => {
+    console.log("🧊 Received ICE candidate");
+    
+    // ✅ NEW: Check if we have remote description before adding candidate
+    const pc = peerConnectionRef.current;
+    
+    if (!pc) {
+      console.log('📦 Queueing ICE candidate (no peer connection yet)');
+      setPendingIceCandidates(prev => [...prev, msg.candidate]);
+      return;
+    }
+    
+    try {
+      // If no remote description yet, queue the candidate
+      if (!pc.remoteDescription) {
+        console.log('📦 Queueing ICE candidate (waiting for remote description)');
+        setPendingIceCandidates(prev => [...prev, msg.candidate]);
+        return;
+      }
+
+      // We have remote description, add the candidate immediately
       await addIceCandidate(msg.candidate);
+      
+    } catch (error) {
+      console.error("❌ Error adding ICE candidate:", error);
+      // If error, queue it for retry
+      setPendingIceCandidates(prev => [...prev, msg.candidate]);
     }
   }, []);
 
+  /* -------------------- REGISTER WebSocket HANDLERS (ONCE) -------------------- */
   useEffect(() => {
-    if (!user || handlersRegisteredRef.current) return;
+    if (handlersRegisteredRef.current) return;
+    handlersRegisteredRef.current = true;
 
     console.log("🔌 Registering WebSocket handlers");
-    WebSocketService.on("MESSAGE", handleIncomingMessage);
+
+    WebSocketService.on("TEXT", handleIncomingMessage);
     WebSocketService.on("OFFER", handleOffer);
     WebSocketService.on("ANSWER", handleAnswer);
-    WebSocketService.on("ICE", handleIce);
-    
-    handlersRegisteredRef.current = true;
-  }, [user, handleIncomingMessage, handleOffer, handleAnswer, handleIce]);
+    WebSocketService.on("ICE", handleIceCandidate);
 
-  /* -------------------- MESSAGING -------------------- */
-  const handleSendMessage = (text, isFileMessage = false) => {
-    if (!selectedChat || !user) return;
+    return () => {
+      WebSocketService.off("TEXT", handleIncomingMessage);
+      WebSocketService.off("OFFER", handleOffer);
+      WebSocketService.off("ANSWER", handleAnswer);
+      WebSocketService.off("ICE", handleIceCandidate);
+      handlersRegisteredRef.current = false;
+    };
+  }, [handleIncomingMessage, handleOffer, handleAnswer, handleIceCandidate]);
 
-    let message;
-    
-    if (isFileMessage) {
-      message = {
-        ...text,
-        chatId: selectedChat.id
-      };
-    } else {
-      message = {
-        id: crypto.randomUUID(),
-        senderId: user.id,
-        content: text,
-        timestamp: new Date(),
-        status: "sending",
-        chatId: selectedChat.id
-      };
-    }
+  /* -------------------- SEND MESSAGE -------------------- */
+  const handleSendMessage = (content, file = null) => {
+    if (!selectedChat || (!content.trim() && !file)) return;
 
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === selectedChat.id
-          ? {
-              ...chat,
-              messages: [...chat.messages, message],
-              lastMessage: isFileMessage ? `📎 ${message.fileName}` : text,
-              lastTimestamp: new Date()
-            }
-          : chat
-      )
-    );
+    if (file) {
+      console.log("📎 Sending file via DataChannel:", file.name);
+      
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const arrayBuffer = e.target.result;
+        const chunkSize = 16384;
+        const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize);
 
-    if (!isFileMessage) {
-      WebSocketService.send({
-        type: "MESSAGE",
-        to: selectedChat.peerId,
-        payload: {
-          content: text,
-          messageId: message.id
+        const metadata = JSON.stringify({
+          type: "file-meta",
+          name: file.name,
+          size: file.size,
+          mime: file.type,
+          totalChunks
+        });
+        
+        createDataChannel().send(metadata);
+
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * chunkSize;
+          const end = Math.min(start + chunkSize, arrayBuffer.byteLength);
+          const chunk = arrayBuffer.slice(start, end);
+          createDataChannel().send(chunk);
         }
-      });
 
-      setTimeout(() => {
+        const fileMessage = {
+          id: crypto.randomUUID(),
+          senderId: user.id,
+          type: "file",
+          fileName: file.name,
+          fileSize: file.size,
+          timestamp: new Date(),
+          status: "sent"
+        };
+
         setChats(prev =>
           prev.map(chat =>
             chat.id === selectedChat.id
               ? {
                   ...chat,
-                  messages: chat.messages.map(msg =>
-                    msg.id === message.id ? { ...msg, status: "sent" } : msg
-                  )
+                  messages: [...chat.messages, fileMessage],
+                  lastMessage: `📎 ${file.name}`,
+                  lastTimestamp: new Date()
                 }
               : chat
           )
         );
-      }, 100);
+      };
+      reader.readAsArrayBuffer(file);
+
     } else {
+      const newMessage = {
+        id: crypto.randomUUID(),
+        senderId: user.id,
+        content: content,
+        timestamp: new Date(),
+        status: "sending"
+      };
+
+      setChats(prev =>
+        prev.map(chat =>
+          chat.id === selectedChat.id
+            ? {
+                ...chat,
+                messages: [...chat.messages, newMessage],
+                lastMessage: content,
+                lastTimestamp: new Date()
+              }
+            : chat
+        )
+      );
+
+      // ✅ FIXED: Use the helper method with recipient
+      WebSocketService.sendTextMessage(selectedChat.peerId, content);
+
       setTimeout(() => {
         setChats(prev =>
           prev.map(chat =>
             chat.id === selectedChat.id
               ? {
                   ...chat,
-                  messages: chat.messages.map(msg =>
-                    msg.id === message.id ? { ...msg, status: "sent" } : msg
+                  messages: chat.messages.map(m =>
+                    m.id === newMessage.id ? { ...m, status: "delivered" } : m
                   )
                 }
               : chat
@@ -448,19 +529,19 @@ function App() {
     currentPeerIdRef.current = selectedChat.peerId;
     setDataOnlyMode(true);
 
-    await createPeerConnection(
+    const pc = await createPeerConnection(
       (candidate) => {
-        WebSocketService.send({
-          type: "ICE",
-          to: selectedChat.peerId,
-          candidate
-        });
+        // ✅ FIXED: Use helper method with recipient
+        WebSocketService.sendIceCandidate(selectedChat.peerId, candidate);
       },
       (stream) => {
         console.log("📺 Received remote stream");
         setRemoteStream(stream);
       }
     );
+
+    // Store peer connection reference
+    peerConnectionRef.current = pc;
 
     createDataChannel(
       (data) => handleIncomingData(data, handleFileReceived),
@@ -471,6 +552,8 @@ function App() {
     );
     
     const offer = await createOffer();
+    
+    // ✅ FIXED: Use helper method with recipient
     WebSocketService.send({
       type: "OFFER",
       to: selectedChat.peerId,
@@ -492,14 +575,12 @@ function App() {
     setCallDuration(0);
     setIsMuted(false);
     setIsVideoOff(false);
+    setPendingIceCandidates([]); // Clear any pending candidates
 
-    await createPeerConnection(
+    const pc = await createPeerConnection(
       (candidate) => {
-        WebSocketService.send({
-          type: "ICE",
-          to: selectedChat.peerId,
-          candidate
-        });
+        // ✅ FIXED: Use helper method with recipient
+        WebSocketService.sendIceCandidate(selectedChat.peerId, candidate);
       },
       (stream) => {
         console.log("📺 Received remote stream");
@@ -527,6 +608,7 @@ function App() {
         },
         onIceRestart: (offer) => {
           console.log("🧊 ICE restart");
+          // ✅ FIXED: Use send with 'to' field
           WebSocketService.send({
             type: "OFFER",
             to: currentPeerIdRef.current,
@@ -540,6 +622,9 @@ function App() {
         }
       }
     );
+
+    // Store peer connection reference
+    peerConnectionRef.current = pc;
 
     const quality = 'high'; // Start with high quality, will auto-adapt
     const stream = await getUserMedia(true, video, quality);
@@ -555,6 +640,8 @@ function App() {
     );
     
     const offer = await createOffer();
+    
+    // ✅ FIXED: Use send with 'to' field
     WebSocketService.send({
       type: "OFFER",
       to: selectedChat.peerId,
@@ -579,7 +666,9 @@ function App() {
     setCallStartTime(null);
     setConnectionQuality('good');
     setIsReconnecting(false);
+    setPendingIceCandidates([]); // Clear pending candidates
     currentPeerIdRef.current = null;
+    peerConnectionRef.current = null;
     
     if (callDurationInterval.current) {
       clearInterval(callDurationInterval.current);

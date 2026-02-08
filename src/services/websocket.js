@@ -1,4 +1,4 @@
-// services/websocket.js - Updated with Recipient Validation
+// services/websocket.js - Fixed PING handling
 
 import ChunkHandler from "./chunkHandler";
 
@@ -134,9 +134,26 @@ class WebSocketService {
 
   /**
    * IMPROVED: Validate message has recipient before sending
+   * Special handling for PING messages (no recipient needed)
    */
   send(message) {
-    // Validate recipient field exists
+    // PING messages don't need a recipient - they're handled by the server heartbeat
+    if (message.type === 'PING') {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        return false;
+      }
+      
+      try {
+        // Send PING without recipient - server handles it specially
+        this.socket.send(JSON.stringify(message));
+        return true;
+      } catch (error) {
+        console.error('❌ Error sending ping:', error);
+        return false;
+      }
+    }
+
+    // All other messages need a recipient
     if (!message.to && !message.recipientId && !message.peerId) {
       console.error('❌ Cannot send message without recipient!');
       console.error('   Message:', message);
@@ -345,8 +362,9 @@ class WebSocketService {
   }
 
   // Send heartbeat/ping to keep connection alive
+  // FIXED: PING doesn't need a recipient
   sendPing() {
-    this.send({ type: 'PING', timestamp: Date.now(), to: 'server' });
+    this.send({ type: 'PING', timestamp: Date.now() });
   }
 }
 
