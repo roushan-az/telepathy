@@ -17,6 +17,13 @@ function ChatWindow({ chat, messages = [], currentUser, onSendMessage, onCall })
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
+  /* -------------------- Debug -------------------- */
+  useEffect(() => {
+    console.log("💬 ChatWindow - messages count:", messages.length);
+    console.log("💬 ChatWindow - messages:", messages);
+    console.log("💬 ChatWindow - currentUser:", currentUser);
+  }, [messages, currentUser]);
+
   /* -------------------- Auto scroll -------------------- */
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -116,12 +123,19 @@ function ChatWindow({ chat, messages = [], currentUser, onSendMessage, onCall })
           🔒 Messages are end-to-end encrypted
         </div>
 
+        {messages.length === 0 && (
+          <div style={{ textAlign: 'center', padding: '20px', color: '#999' }}>
+            No messages yet. Start the conversation!
+          </div>
+        )}
+
         {messages.map((msg, index) => {
-          const isOwn = msg.senderId === currentUser.id;
+          const isOwn = msg.senderId === currentUser?.id;
+          console.log(`💬 Rendering message ${index}: senderId=${msg.senderId}, currentUserId=${currentUser?.id}, isOwn=${isOwn}, content="${msg.content}"`);
 
           return (
             <div
-              key={msg.id}
+              key={msg.id || index}
               className={`message ${isOwn ? "own" : "other"}`}
             >
               <div className="message-bubble">

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import ChatWindow from "./components/ChatWindow.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import "./App.css";
@@ -17,87 +17,26 @@ import {
 } from "./services/webrtc";
 
 function App() {
-
-  const demoChannel = new BroadcastChannel("telepathy-demo");
   /* -------------------- USER -------------------- */
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
 
-  /* -------------------- DUMMY USERS -------------------- */
-    const DEMO_USERS = {
-      alice: { id: "user-1", name: "Alice" },
-      bob: { id: "user-2", name: "Bob" }
-    };
-
-  const getDemoUser = () => {
-    // Always check URL parameters first
-    const params = new URLSearchParams(window.location.search);
-    const urlKey = params.get("user");
-    
-    // If URL has a user parameter, use that and update localStorage
-    if (urlKey) {
-      const user = DEMO_USERS[urlKey] || DEMO_USERS.alice;
-      localStorage.setItem("demoUser", JSON.stringify(user));
-      return user;
-    }
-    
-    // If no URL parameter, check localStorage
-    const saved = localStorage.getItem("demoUser");
-    if (saved && saved !== "undefined" && saved !== "null") {
-      return JSON.parse(saved);
-    }
-    
-    // Default to alice
-    const defaultUser = DEMO_USERS.alice;
-    localStorage.setItem("demoUser", JSON.stringify(defaultUser));
-    return defaultUser;
-  };  
-    
-  const [currentUser] = useState(getDemoUser());
+  /* -------------------- DEMO PEER MAPPING -------------------- */
+  const [peerUserId, setPeerUserId] = useState(null);
+  const [peerName, setPeerName] = useState(null);
 
   /* -------------------- CHATS -------------------- */
-  const [chats, setChats] = useState([
-    {
-      id: "chat-1",
-      name: currentUser.id === "user-1" ? "Bob" : "Alice",
-      participants: ["user-1", "user-2"],
-      online: true,
-      messages: []
-    }
-  ]);
-
-  const [selectedChat, setSelectedChat] = useState(chats[0]);
-
-  /* -------------------- broadcast & listen Message -------------------- */
-  function broadcastMessage(message) {
-    localStorage.setItem(
-      "demo-message",
-      JSON.stringify({ ...message, ts: Date.now() })
-    );
-  }
-
+  const [chats, setChats] = useState([]);
+  const [selectedChatId, setSelectedChatId] = useState(null);
+  
+  // Keep a ref to chats for immediate access in callbacks
+  const chatsRef = useRef([]);
   useEffect(() => {
-  const onStorage = (e) => {
-    if (e.key !== "demo-message" || !e.newValue) return;
+    chatsRef.current = chats;
+  }, [chats]);
 
-    const msg = JSON.parse(e.newValue);
-
-    // ignore own messages
-    if (msg.senderId === currentUser.id) return;
-
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === "chat-1"
-          ? { ...chat, messages: [...chat.messages, msg] }
-          : chat
-      )
-    );
-  };
-
-  window.addEventListener("storage", onStorage);
-  return () => window.removeEventListener("storage", onStorage);
-}, [currentUser.id]);
-
+  // Derive selectedChat from chats array to always have latest version
+  const selectedChat = chats.find(c => c.id === selectedChatId) || chats[0];
 
   /* -------------------- WebRTC -------------------- */
   const [localStream, setLocalStream] = useState(null);
@@ -105,14 +44,19 @@ function App() {
   const [inCall, setInCall] = useState(false);
 
   const wsConnectedRef = useRef(false);
+  const handlersRegisteredRef = useRef(false);
 
   /* -------------------- BOOTSTRAP AUTH -------------------- */
   useEffect(() => {
     const bootstrap = async () => {
-      let storedToken = localStorage.getItem("token");
-      let storedUserId = localStorage.getItem("userId");
+      const params = new URLSearchParams(window.location.search);
+      const userParam = params.get("user");
+
+      let storedToken = localStorage.getItem(`token_${userParam}`);
+      let storedUserId = localStorage.getItem(`userId_${userParam}`);
 
       if (!storedToken) {
+        console.log("🔐 Creating new anonymous user...");
         const res = await fetch("http://localhost:8080/api/auth/anonymous", {
           method: "POST"
         });
@@ -121,19 +65,57 @@ function App() {
         storedToken = data.accessToken;
         storedUserId = data.user.userId;
 
-        localStorage.setItem("token", storedToken);
-        localStorage.setItem("userId", storedUserId);
+        localStorage.setItem(`token_${userParam}`, storedToken);
+        localStorage.setItem(`userId_${userParam}`, storedUserId);
 
-        setUser({ id: storedUserId, name: "Anonymous" });
-        setToken(storedToken);
+        console.log(`✅ User created: ${storedUserId}`);
       } else {
-        setUser({ id: storedUserId, name: "Anonymous" });
-        setToken(storedToken);
+        console.log(`✅ User loaded: ${storedUserId}`);
+      }
+
+      setUser({ id: storedUserId, name: userParam === "alice" ? "Alice" : "Bob" });
+      setToken(storedToken);
+
+      // Setup peer based on URL parameter
+      if (userParam === "alice") {
+        const bobUserId = localStorage.getItem("userId_bob");
+        if (bobUserId) {
+          setPeerUserId(bobUserId);
+          setPeerName("Bob");
+        }
+      } else if (userParam === "bob") {
+        const aliceUserId = localStorage.getItem("userId_alice");
+        if (aliceUserId) {
+          setPeerUserId(aliceUserId);
+          setPeerName("Alice");
+        }
       }
     };
 
     bootstrap();
   }, []);
+
+  /* -------------------- INITIALIZE DEFAULT CHAT -------------------- */
+  useEffect(() => {
+    if (!user || !peerUserId) return;
+
+    console.log(`📱 Setting up chat: ${user.name} → ${peerName} (${peerUserId})`);
+
+    const defaultChat = {
+      id: "chat-1",
+      peerId: peerUserId,
+      name: peerName,
+      participants: [user.id, peerUserId],
+      online: true,
+      messages: [],
+      lastMessage: "",
+      lastTimestamp: null,
+      unreadCount: 0
+    };
+
+    setChats([defaultChat]);
+    setSelectedChatId("chat-1");
+  }, [user, peerUserId, peerName]);
 
   /* -------------------- WEBSOCKET (ONCE) -------------------- */
   useEffect(() => {
@@ -143,48 +125,36 @@ function App() {
     wsConnectedRef.current = true;
     WebSocketService.connect(token);
 
-    WebSocketService.on("MESSAGE", handleIncomingMessage);
-    WebSocketService.on("OFFER", handleOffer);
-    WebSocketService.on("ANSWER", handleAnswer);
-    WebSocketService.on("ICE", handleIce);
-
     return () => {
       wsConnectedRef.current = false;
       WebSocketService.disconnect();
     };
   }, [token]);
 
-  /* -------------------- MESSAGING -------------------- */
-  const handleSendMessage = (text) => {
-    if (!selectedChat) return;
+  /* -------------------- WEBSOCKET HANDLERS (ONCE) -------------------- */
+  const handleIncomingMessage = useCallback((msg) => {
+    // Try to get sender from message fields
+    let senderId = msg.from || msg.senderId || msg.sender || msg.userId;
+    
+    // If backend doesn't include 'from', infer from 'to' field using chatsRef
+    if (!senderId && msg.to) {
+      const chat = chatsRef.current.find(c => c.participants?.includes(msg.to));
+      if (chat?.peerId) {
+        senderId = chat.peerId;
+        console.log(`🔄 Inferred sender from peer: ${senderId}`);
+      }
+    }
+    
+    console.log(`📥 Received message from ${senderId}:`, msg.payload?.content);
 
-    const message = {
-      id: crypto.randomUUID(),
-      senderId: currentUser.id,
-      content: text,
-      timestamp: new Date(),
-      status: "sent",
-      chatId: selectedChat.id
-    };
+    if (!senderId) {
+      console.error("❌ Cannot determine sender ID from message:", msg);
+      return;
+    }
 
-    // 1️⃣ Update my UI
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === selectedChat.id
-          ? { ...chat, messages: [...chat.messages, message] }
-          : chat
-      )
-    );
-
-    // 2️⃣ Broadcast to other tab
-    demoChannel.postMessage(message);
-  };
-
-
-  const handleIncomingMessage = (msg) => {
     const incoming = {
       id: crypto.randomUUID(),
-      senderId: msg.from,
+      senderId: senderId,
       content: msg.payload?.content || msg.payload,
       timestamp: new Date(),
       status: "delivered"
@@ -192,71 +162,36 @@ function App() {
 
     setChats(prev =>
       prev.map(chat =>
-        chat.peerId === msg.from
-          ? { ...chat, messages: [...chat.messages, incoming] }
+        chat.peerId === senderId
+          ? {
+              ...chat,
+              messages: [...chat.messages, incoming],
+              lastMessage: incoming.content,
+              lastTimestamp: new Date(),
+              unreadCount: 0
+            }
           : chat
       )
     );
-  };
+  }, []);
 
-  useEffect(() => {
-  demoChannel.onmessage = (event) => {
-    const msg = event.data;
-
-    // ignore my own messages
-    if (msg.senderId === currentUser.id) return;
-
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === msg.chatId
-          ? { ...chat, messages: [...chat.messages, msg] }
-          : chat
-      )
-    );
-  };
-
-  return () => demoChannel.close();
-}, [currentUser.id]);
-
-
-  /* -------------------- WEBRTC -------------------- */
-  const startCall = async (video = false) => {
-    if (!selectedChat) return;
+  const handleOffer = useCallback(async (msg) => {
+    console.log(`📞 Received OFFER from ${msg.from}`);
     setInCall(true);
 
     await createPeerConnection(
-      (candidate) =>
-        WebSocketService.send({
-          type: "ICE",
-          to: selectedChat.peerId,
-          candidate
-        }),
-      (stream) => setRemoteStream(stream)
-    );
-
-    const stream = await getUserMedia(true, video);
-    setLocalStream(stream);
-    addTracks();
-
-    const offer = await createOffer();
-    WebSocketService.send({
-      type: "OFFER",
-      to: selectedChat.peerId,
-      offer
-    });
-  };
-
-  const handleOffer = async (msg) => {
-    setInCall(true);
-
-    await createPeerConnection(
-      (candidate) =>
+      (candidate) => {
+        console.log("🧊 Sending ICE candidate");
         WebSocketService.send({
           type: "ICE",
           to: msg.from,
           candidate
-        }),
-      (stream) => setRemoteStream(stream)
+        });
+      },
+      (stream) => {
+        console.log("📺 Received remote stream");
+        setRemoteStream(stream);
+      }
     );
 
     const stream = await getUserMedia(true, true);
@@ -264,24 +199,135 @@ function App() {
     addTracks();
 
     const answer = await createAnswer(msg.offer);
+    console.log("📤 Sending ANSWER");
     WebSocketService.send({
       type: "ANSWER",
       to: msg.from,
       answer
     });
-  };
+  }, []);
 
-  const handleAnswer = async (msg) => {
+  const handleAnswer = useCallback(async (msg) => {
+    console.log(`✅ Received ANSWER from ${msg.from}`);
     await setRemoteAnswer(msg.answer);
-  };
+  }, []);
 
-  const handleIce = async (msg) => {
+  const handleIce = useCallback(async (msg) => {
     if (msg?.candidate) {
+      console.log(`🧊 Received ICE candidate`);
       await addIceCandidate(msg.candidate);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!user || handlersRegisteredRef.current) return;
+
+    console.log("📌 Registering WebSocket handlers");
+    WebSocketService.on("MESSAGE", handleIncomingMessage);
+    WebSocketService.on("OFFER", handleOffer);
+    WebSocketService.on("ANSWER", handleAnswer);
+    WebSocketService.on("ICE", handleIce);
+    
+    handlersRegisteredRef.current = true;
+
+    return () => {
+      console.log("🧹 Cleanup: handlers stay registered (singleton pattern)");
+    };
+  }, [user, handleIncomingMessage, handleOffer, handleAnswer, handleIce]);
+
+  /* -------------------- MESSAGING -------------------- */
+  const handleSendMessage = (text) => {
+    if (!selectedChat || !user) return;
+
+    const message = {
+      id: crypto.randomUUID(),
+      senderId: user.id,
+      content: text,
+      timestamp: new Date(),
+      status: "sending",
+      chatId: selectedChat.id
+    };
+
+    console.log(`📤 Sending to ${selectedChat.peerId}: "${text}"`);
+
+    // Update UI immediately
+    setChats(prev =>
+      prev.map(chat =>
+        chat.id === selectedChat.id
+          ? {
+              ...chat,
+              messages: [...chat.messages, message],
+              lastMessage: text,
+              lastTimestamp: new Date()
+            }
+          : chat
+      )
+    );
+
+    // Send via WebSocket
+    WebSocketService.send({
+      type: "MESSAGE",
+      to: selectedChat.peerId,
+      payload: {
+        content: text,
+        messageId: message.id
+      }
+    });
+
+    // Update status to "sent"
+    setTimeout(() => {
+      setChats(prev =>
+        prev.map(chat =>
+          chat.id === selectedChat.id
+            ? {
+                ...chat,
+                messages: chat.messages.map(msg =>
+                  msg.id === message.id ? { ...msg, status: "sent" } : msg
+                )
+              }
+            : chat
+        )
+      );
+    }, 100);
+  };
+
+  /* -------------------- WEBRTC CALL INITIATOR -------------------- */
+  const startCall = async (video = false) => {
+    if (!selectedChat) return;
+    
+    console.log(`📞 Starting ${video ? 'video' : 'audio'} call`);
+    setInCall(true);
+
+    await createPeerConnection(
+      (candidate) => {
+        console.log("🧊 Sending ICE candidate");
+        WebSocketService.send({
+          type: "ICE",
+          to: selectedChat.peerId,
+          candidate
+        });
+      },
+      (stream) => {
+        console.log("📺 Received remote stream");
+        setRemoteStream(stream);
+      }
+    );
+
+    const stream = await getUserMedia(true, video);
+    setLocalStream(stream);
+    addTracks();
+
+    const offer = await createOffer();
+    console.log("📤 Sending OFFER");
+    WebSocketService.send({
+      type: "OFFER",
+      to: selectedChat.peerId,
+      offer
+    });
   };
 
   const endCall = () => {
+    console.log("📴 Ending call");
     closeConnection();
     setLocalStream(null);
     setRemoteStream(null);
@@ -293,78 +339,92 @@ function App() {
     return <div className="init-screen">Initializing secure session…</div>;
   }
 
-  /* -------------------- Sidebar: Add Chat -------------------- */
-const addChat = () => {
-  const peerName = prompt("Enter user name (dummy):");
-  if (!peerName) return;
+  if (!peerUserId) {
+    return (
+      <div className="init-screen">
+        <p>Waiting for peer connection...</p>
+        <small>Open both tabs: ?user=alice and ?user=bob</small>
+      </div>
+    );
+  }
 
-  const peerId = crypto.randomUUID();
+  const addChat = () => {
+    const peerName = prompt("Enter peer name:");
+    if (!peerName) return;
 
-  const newChat = {
-    id: peerId,
-    participants: [currentUser.id, peerId],
-    name: peerName,
-    online: true,
-    messages: []
+    const peerId = prompt("Enter peer user ID:");
+    if (!peerId) return;
+
+    const newChat = {
+      id: crypto.randomUUID(),
+      peerId: peerId,
+      participants: [user.id, peerId],
+      name: peerName,
+      online: true,
+      messages: [],
+      lastMessage: "",
+      lastTimestamp: null,
+      unreadCount: 0
+    };
+
+    setChats(prev => [...prev, newChat]);
+    setSelectedChatId(newChat.id);
   };
 
-  setChats(prev => [...prev, newChat]);
-  setSelectedChat(newChat);
-};
+  const handleCall = (type) => {
+    if (type === "audio") {
+      startCall(false);
+    } else if (type === "video") {
+      startCall(true);
+    }
+  };
 
-const handleCall = (type) => {
-  alert(
-    `${currentUser.name} started a ${type} call (demo mode)`
+  return (
+    <div className="app-container">
+      <div className="sidebar-wrapper">
+        <Sidebar
+          chats={chats}
+          selectedChat={selectedChat}
+          onSelectChat={(chat) => setSelectedChatId(chat.id)}
+          onAddChat={addChat}
+          currentUser={user}
+        />
+      </div>
+
+      <div className="chat-wrapper">
+        <ChatWindow
+          chat={selectedChat}
+          messages={selectedChat?.messages || []}
+          currentUser={user}
+          onSendMessage={handleSendMessage}
+          onCall={handleCall}
+          inCall={inCall}
+          startCall={startCall}
+          endCall={endCall}
+        />
+      </div>
+
+      {/* Video streams */}
+      {localStream && (
+        <video
+          className="local-video"
+          autoPlay
+          muted
+          playsInline
+          ref={(v) => v && (v.srcObject = localStream)}
+        />
+      )}
+
+      {remoteStream && (
+        <video
+          className="remote-video"
+          autoPlay
+          playsInline
+          ref={(v) => v && (v.srcObject = remoteStream)}
+        />
+      )}
+    </div>
   );
-};
-
-return (
-  <div className="app-container">
-    <div className="sidebar-wrapper">
-      <Sidebar
-        chats={chats}
-        selectedChat={selectedChat}
-        onSelectChat={setSelectedChat}
-        onAddChat={addChat}
-        currentUser={currentUser}
-      />
-    </div>
-
-    <div className="chat-wrapper">
-      <ChatWindow
-        chat={selectedChat}
-        messages={selectedChat?.messages || []}
-        currentUser={currentUser}
-        onSendMessage={handleSendMessage}
-        onCall={handleCall}
-        inCall={inCall}          // ✅ FIXED
-        startCall={startCall}    // ✅ FIXED
-        endCall={endCall}        // ✅ FIXED
-      />
-    </div>
-
-    {/* Video streams (unchanged) */}
-    {localStream && (
-      <video
-        className="local-video"
-        autoPlay
-        muted
-        playsInline
-        ref={(v) => v && (v.srcObject = localStream)}
-      />
-    )}
-
-    {remoteStream && (
-      <video
-        className="remote-video"
-        autoPlay
-        playsInline
-        ref={(v) => v && (v.srcObject = remoteStream)}
-      />
-    )}
-  </div>
-);
-
 }
 
 export default App;
