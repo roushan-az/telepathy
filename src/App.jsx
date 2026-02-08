@@ -3,8 +3,9 @@ import ChatWindow from "./components/ChatWindow.jsx";
 import Sidebar from "./components/Sidebar.jsx";
 import "./App.css";
 import WebSocketService from "./services/websocket";
+import CallScreen from "./components/Callscreen .jsx";
 
-// WebRTC helpers
+// Enhanced WebRTC helpers
 import {
   createPeerConnection,
   getUserMedia,
@@ -16,8 +17,15 @@ import {
   closeConnection,
   createDataChannel,
   setupDataChannelForReceiver,
-  handleIncomingData
+  handleIncomingData,
+  toggleMute,
+  toggleCamera,
+  switchCamera,
+  getMuteState,
+  getConnectionState,
+  adjustVideoQuality
 } from "./services/webrtc";
+
 
 function App() {
   const [dataReady, setDataReady] = useState(false);
@@ -45,11 +53,47 @@ function App() {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [inCall, setInCall] = useState(false);
+  const [isVideoCall, setIsVideoCall] = useState(false);
   const [dataOnlyMode, setDataOnlyMode] = useState(false);
   const [showSidebar, setShowSidebar] = useState(true);
 
+  /* -------------------- CALL STATE -------------------- */
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [callDuration, setCallDuration] = useState(0);
+  const [connectionQuality, setConnectionQuality] = useState('good');
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [callStartTime, setCallStartTime] = useState(null);
+
+  const callDurationInterval = useRef(null);
   const wsConnectedRef = useRef(false);
   const handlersRegisteredRef = useRef(false);
+  const currentPeerIdRef = useRef(null);
+
+  /* -------------------- CALL DURATION TIMER -------------------- */
+  useEffect(() => {
+    if (inCall && remoteStream && !isReconnecting) {
+      if (!callStartTime) {
+        setCallStartTime(Date.now());
+      }
+      
+      callDurationInterval.current = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - (callStartTime || Date.now())) / 1000);
+        setCallDuration(elapsed);
+      }, 1000);
+    } else {
+      if (callDurationInterval.current) {
+        clearInterval(callDurationInterval.current);
+        callDurationInterval.current = null;
+      }
+    }
+
+    return () => {
+      if (callDurationInterval.current) {
+        clearInterval(callDurationInterval.current);
+      }
+    };
+  }, [inCall, remoteStream, isReconnecting, callStartTime]);
 
   /* -------------------- BOOTSTRAP AUTH -------------------- */
   useEffect(() => {
@@ -153,7 +197,6 @@ function App() {
 
     setChats(prev =>
       prev.map(chat => {
-        // Add to the chat with the peer who sent it
         if (chat.peerId === peerUserId) {
           return {
             ...chat,
@@ -211,11 +254,15 @@ function App() {
   const handleOffer = useCallback(async (msg) => {
     console.log(`📞 Received OFFER from ${msg.from}`);
     
+    currentPeerIdRef.current = msg.from;
     const isDataOnly = msg.dataOnly === true;
     setDataOnlyMode(isDataOnly);
     
     if (!isDataOnly) {
       setInCall(true);
+      setIsVideoCall(msg.isVideo || false);
+      setCallStartTime(Date.now());
+      setCallDuration(0);
     }
 
     await createPeerConnection(
@@ -229,6 +276,40 @@ function App() {
       (stream) => {
         console.log("📺 Received remote stream");
         setRemoteStream(stream);
+      },
+      {
+        onConnectionStateChange: (state) => {
+          console.log(`Connection state: ${state}`);
+        },
+        onConnected: () => {
+          console.log("✅ Connected");
+          setIsReconnecting(false);
+        },
+        onDisconnected: () => {
+          console.log("⚠️ Disconnected");
+        },
+        onReconnecting: (attempt) => {
+          console.log(`🔄 Reconnecting (attempt ${attempt})`);
+          setIsReconnecting(true);
+        },
+        onReconnectFailed: () => {
+          console.log("❌ Reconnection failed");
+          alert("Connection lost. Call ended.");
+          endCall();
+        },
+        onIceRestart: (offer) => {
+          console.log("🧊 ICE restart");
+          WebSocketService.send({
+            type: "OFFER",
+            to: currentPeerIdRef.current,
+            offer,
+            iceRestart: true
+          });
+        },
+        onNetworkQualityChange: (quality, lossRate) => {
+          setConnectionQuality(quality);
+          console.log(`Network quality: ${quality} (${(lossRate * 100).toFixed(1)}% loss)`);
+        }
       }
     );
 
@@ -243,7 +324,8 @@ function App() {
 
     // Only get media if not data-only mode
     if (!isDataOnly) {
-      const stream = await getUserMedia(true, true);
+      const quality = 'high'; // Start with high quality
+      const stream = await getUserMedia(true, msg.isVideo || false, quality);
       setLocalStream(stream);
       addTracks();
     }
@@ -288,13 +370,11 @@ function App() {
     let message;
     
     if (isFileMessage) {
-      // text is actually a file message object
       message = {
         ...text,
         chatId: selectedChat.id
       };
     } else {
-      // Regular text message
       message = {
         id: crypto.randomUUID(),
         senderId: user.id,
@@ -318,7 +398,6 @@ function App() {
       )
     );
 
-    // Only send text messages via WebSocket (files go via WebRTC DataChannel)
     if (!isFileMessage) {
       WebSocketService.send({
         type: "MESSAGE",
@@ -344,7 +423,6 @@ function App() {
         );
       }, 100);
     } else {
-      // Update file message status to sent after a short delay
       setTimeout(() => {
         setChats(prev =>
           prev.map(chat =>
@@ -367,6 +445,7 @@ function App() {
     if (!selectedChat) return;
     
     console.log(`🔗 Starting data-only connection for file transfer`);
+    currentPeerIdRef.current = selectedChat.peerId;
     setDataOnlyMode(true);
 
     await createPeerConnection(
@@ -383,7 +462,6 @@ function App() {
       }
     );
 
-    // Create data channel for file transfer
     createDataChannel(
       (data) => handleIncomingData(data, handleFileReceived),
       () => {
@@ -406,8 +484,14 @@ function App() {
     if (!selectedChat) return;
     
     console.log(`📞 Starting ${video ? 'video' : 'audio'} call`);
+    currentPeerIdRef.current = selectedChat.peerId;
     setInCall(true);
+    setIsVideoCall(video);
     setDataOnlyMode(false);
+    setCallStartTime(Date.now());
+    setCallDuration(0);
+    setIsMuted(false);
+    setIsVideoOff(false);
 
     await createPeerConnection(
       (candidate) => {
@@ -420,14 +504,48 @@ function App() {
       (stream) => {
         console.log("📺 Received remote stream");
         setRemoteStream(stream);
+      },
+      {
+        onConnectionStateChange: (state) => {
+          console.log(`Connection state: ${state}`);
+        },
+        onConnected: () => {
+          console.log("✅ Connected");
+          setIsReconnecting(false);
+        },
+        onDisconnected: () => {
+          console.log("⚠️ Disconnected");
+        },
+        onReconnecting: (attempt) => {
+          console.log(`🔄 Reconnecting (attempt ${attempt})`);
+          setIsReconnecting(true);
+        },
+        onReconnectFailed: () => {
+          console.log("❌ Reconnection failed");
+          alert("Connection lost. Call ended.");
+          endCall();
+        },
+        onIceRestart: (offer) => {
+          console.log("🧊 ICE restart");
+          WebSocketService.send({
+            type: "OFFER",
+            to: currentPeerIdRef.current,
+            offer,
+            iceRestart: true,
+            isVideo: video
+          });
+        },
+        onNetworkQualityChange: (quality, lossRate) => {
+          setConnectionQuality(quality);
+        }
       }
     );
 
-    const stream = await getUserMedia(true, video);
+    const quality = 'high'; // Start with high quality, will auto-adapt
+    const stream = await getUserMedia(true, video, quality);
     setLocalStream(stream);
     addTracks();
 
-    // Create data channel for file transfer
     createDataChannel(
       (data) => handleIncomingData(data, handleFileReceived),
       () => {
@@ -441,7 +559,8 @@ function App() {
       type: "OFFER",
       to: selectedChat.peerId,
       offer,
-      dataOnly: false
+      dataOnly: false,
+      isVideo: video
     });
   };
 
@@ -451,8 +570,36 @@ function App() {
     setLocalStream(null);
     setRemoteStream(null);
     setInCall(false);
+    setIsVideoCall(false);
     setDataOnlyMode(false);
     setDataReady(false);
+    setIsMuted(false);
+    setIsVideoOff(false);
+    setCallDuration(0);
+    setCallStartTime(null);
+    setConnectionQuality('good');
+    setIsReconnecting(false);
+    currentPeerIdRef.current = null;
+    
+    if (callDurationInterval.current) {
+      clearInterval(callDurationInterval.current);
+      callDurationInterval.current = null;
+    }
+  };
+
+  /* -------------------- CALL CONTROLS -------------------- */
+  const handleToggleMute = () => {
+    const muted = toggleMute();
+    setIsMuted(muted);
+  };
+
+  const handleToggleVideo = () => {
+    const videoOff = toggleCamera();
+    setIsVideoOff(videoOff);
+  };
+
+  const handleSwitchCamera = () => {
+    switchCamera();
   };
 
   /* -------------------- UI -------------------- */
@@ -502,7 +649,6 @@ function App() {
 
   const handleSelectChat = (chat) => {
     setSelectedChatId(chat.id);
-    // Hide sidebar on mobile when chat is selected
     if (window.innerWidth <= 768) {
       setShowSidebar(false);
     }
@@ -514,6 +660,7 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* Sidebar */}
       <div className={`sidebar-wrapper ${!showSidebar ? 'hidden' : ''}`}>
         <Sidebar
           chats={chats}
@@ -524,6 +671,7 @@ function App() {
         />
       </div>
 
+      {/* Chat Window */}
       <div className="chat-wrapper">
         <ChatWindow
           chat={selectedChat}
@@ -540,22 +688,22 @@ function App() {
         />
       </div>
 
-      {localStream && (
-        <video
-          className="local-video"
-          autoPlay
-          muted
-          playsInline
-          ref={(v) => v && (v.srcObject = localStream)}
-        />
-      )}
-
-      {remoteStream && (
-        <video
-          className="remote-video"
-          autoPlay
-          playsInline
-          ref={(v) => v && (v.srcObject = remoteStream)}
+      {/* Full-Screen Call Interface */}
+      {inCall && !dataOnlyMode && (
+        <CallScreen
+          localStream={localStream}
+          remoteStream={remoteStream}
+          peerName={selectedChat?.name}
+          isVideoCall={isVideoCall}
+          onEndCall={endCall}
+          onToggleMute={handleToggleMute}
+          onToggleVideo={handleToggleVideo}
+          onSwitchCamera={handleSwitchCamera}
+          isMuted={isMuted}
+          isVideoOff={isVideoOff}
+          callDuration={callDuration}
+          connectionQuality={connectionQuality}
+          isReconnecting={isReconnecting}
         />
       )}
     </div>
