@@ -12,7 +12,15 @@ import {
 } from 'lucide-react';
 import './ChatWindow.css';
 
-function ChatWindow({ chat, messages, currentUser, onSendMessage }) {
+function ChatWindow({
+  chat,
+  messages,
+  currentUser,
+  onSendMessage,
+  inCall,
+  startCall,
+  endCall
+}) {
   const [messageInput, setMessageInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef(null);

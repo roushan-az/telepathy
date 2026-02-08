@@ -17,20 +17,39 @@ import {
 } from "./services/webrtc";
 
 function App() {
+  /* -------------------- USER -------------------- */
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
-  const [selectedChat, setSelectedChat] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [chats, setChats] = useState([]);
 
-  const wsConnectedRef = useRef(false);
+  /* -------------------- DUMMY USERS -------------------- */
+  const DUMMY_USERS = [
+    { id: "user-1", name: "Alice", online: true },
+    { id: "user-2", name: "Bob", online: true }
+  ];
 
-  // WebRTC state
+  const [currentUser] = useState(DUMMY_USERS[0]); // Alice
+
+  /* -------------------- CHATS -------------------- */
+  const [chats, setChats] = useState([
+    {
+      id: "chat-1",
+      name: "Bob",
+      peerId: "user-2",
+      online: true,
+      messages: []
+    }
+  ]);
+
+  const [selectedChat, setSelectedChat] = useState(chats[0]);
+
+  /* -------------------- WebRTC -------------------- */
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [inCall, setInCall] = useState(false);
 
-  /* -------------------- Bootstrap Auth -------------------- */
+  const wsConnectedRef = useRef(false);
+
+  /* -------------------- BOOTSTRAP AUTH -------------------- */
   useEffect(() => {
     const bootstrap = async () => {
       let storedToken = localStorage.getItem("token");
@@ -48,10 +67,10 @@ function App() {
         localStorage.setItem("token", storedToken);
         localStorage.setItem("userId", storedUserId);
 
-        setUser(data.user);
+        setUser({ id: storedUserId, name: "Anonymous" });
         setToken(storedToken);
       } else {
-        setUser({ userId: storedUserId, name: "Anonymous" });
+        setUser({ id: storedUserId, name: "Anonymous" });
         setToken(storedToken);
       }
     };
@@ -59,7 +78,7 @@ function App() {
     bootstrap();
   }, []);
 
-  /* -------------------- WebSocket (SINGLE SOURCE OF TRUTH) -------------------- */
+  /* -------------------- WEBSOCKET (ONCE) -------------------- */
   useEffect(() => {
     if (!token) return;
     if (wsConnectedRef.current) return;
@@ -78,22 +97,54 @@ function App() {
     };
   }, [token]);
 
-  /* -------------------- Messaging -------------------- */
-  const handleIncomingMessage = (msg) => {
-    setMessages((prev) => [...prev, msg]);
-  };
-
-  const sendMessage = (text) => {
+  /* -------------------- MESSAGING -------------------- */
+  const handleSendMessage = (text) => {
     if (!selectedChat) return;
 
+    const message = {
+      id: crypto.randomUUID(),
+      senderId: currentUser.id,
+      content: text,
+      timestamp: new Date(),
+      status: "sent"
+    };
+
+    // Optimistic update
+    setChats(prev =>
+      prev.map(chat =>
+        chat.id === selectedChat.id
+          ? { ...chat, messages: [...chat.messages, message] }
+          : chat
+      )
+    );
+
+    // WebSocket
     WebSocketService.send({
       type: "MESSAGE",
-      to: selectedChat.id,
-      payload: text
+      to: selectedChat.peerId,
+      payload: message
     });
   };
 
-  /* -------------------- WebRTC -------------------- */
+  const handleIncomingMessage = (msg) => {
+    const incoming = {
+      id: crypto.randomUUID(),
+      senderId: msg.from,
+      content: msg.payload?.content || msg.payload,
+      timestamp: new Date(),
+      status: "delivered"
+    };
+
+    setChats(prev =>
+      prev.map(chat =>
+        chat.peerId === msg.from
+          ? { ...chat, messages: [...chat.messages, incoming] }
+          : chat
+      )
+    );
+  };
+
+  /* -------------------- WEBRTC -------------------- */
   const startCall = async (video = false) => {
     if (!selectedChat) return;
     setInCall(true);
@@ -102,7 +153,7 @@ function App() {
       (candidate) =>
         WebSocketService.send({
           type: "ICE",
-          to: selectedChat.id,
+          to: selectedChat.peerId,
           candidate
         }),
       (stream) => setRemoteStream(stream)
@@ -115,7 +166,7 @@ function App() {
     const offer = await createOffer();
     WebSocketService.send({
       type: "OFFER",
-      to: selectedChat.id,
+      to: selectedChat.peerId,
       offer
     });
   };
@@ -167,33 +218,71 @@ function App() {
     return <div className="init-screen">Initializing secure session…</div>;
   }
 
-  return (
-    <div className="app-container">
+  /* -------------------- Sidebar: Add Chat -------------------- */
+const addChat = () => {
+  const peerName = prompt("Enter user name (dummy):");
+  if (!peerName) return;
+
+  const peerId = crypto.randomUUID();
+
+  const newChat = {
+    id: peerId,
+    participants: [currentUser.id, peerId],
+    name: peerName,
+    online: true,
+    messages: []
+  };
+
+  setChats(prev => [...prev, newChat]);
+  setSelectedChat(newChat);
+};
+
+return (
+  <div className="app-container">
+    <div className="sidebar-wrapper">
       <Sidebar
-        user={user}
         chats={chats}
-        onSelectChat={setSelectedChat}
         selectedChat={selectedChat}
+        onSelectChat={setSelectedChat}
+        onAddChat={addChat}
+        currentUser={currentUser}
       />
-
-      <ChatWindow
-        messages={messages}
-        onSend={sendMessage}
-        onCallAudio={() => startCall(false)}
-        onCallVideo={() => startCall(true)}
-        inCall={inCall}
-        onEndCall={endCall}
-      />
-
-      {localStream && (
-        <video autoPlay muted playsInline ref={(v) => v && (v.srcObject = localStream)} />
-      )}
-
-      {remoteStream && (
-        <video autoPlay playsInline ref={(v) => v && (v.srcObject = remoteStream)} />
-      )}
     </div>
-  );
+
+    <div className="chat-wrapper">
+      <ChatWindow
+        chat={selectedChat}
+        messages={selectedChat?.messages || []}
+        currentUser={currentUser}
+        onSendMessage={handleSendMessage}
+        inCall={inCall}          // ✅ FIXED
+        startCall={startCall}    // ✅ FIXED
+        endCall={endCall}        // ✅ FIXED
+      />
+    </div>
+
+    {/* Video streams (unchanged) */}
+    {localStream && (
+      <video
+        className="local-video"
+        autoPlay
+        muted
+        playsInline
+        ref={(v) => v && (v.srcObject = localStream)}
+      />
+    )}
+
+    {remoteStream && (
+      <video
+        className="remote-video"
+        autoPlay
+        playsInline
+        ref={(v) => v && (v.srcObject = remoteStream)}
+      />
+    )}
+  </div>
+);
+
 }
 
 export default App;

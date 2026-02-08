@@ -1,23 +1,24 @@
-let socket = null;
 const listeners = {};
 
 const WebSocketService = {
+  socket: null,
+
   connect(token) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      console.warn("⚠️ WebSocket already connected");
-      return;
-    }
+    if (this.socket) return;
 
     console.log("🔌 Connecting WebSocket...");
-    socket = new WebSocket(`ws://localhost:8080/ws?token=${token}`);
+    this.socket = new WebSocket(`ws://localhost:8080/ws?token=${token}`);
 
-    socket.onopen = () => console.log("✅ WebSocket connected");
-    socket.onerror = (e) => console.error("❌ WebSocket error", e);
-    socket.onclose = () => console.warn("⚠️ WebSocket closed");
-
-    socket.onmessage = (event) => {
+    this.socket.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       listeners[msg.type]?.forEach(cb => cb(msg));
+    };
+
+    this.socket.onopen = () => console.log("✅ WebSocket connected");
+    this.socket.onerror = () => console.log("❌ WebSocket error");
+    this.socket.onclose = () => {
+      console.log("⚠️ WebSocket closed");
+      this.socket = null;
     };
   },
 
@@ -27,14 +28,12 @@ const WebSocketService = {
   },
 
   send(payload) {
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(payload));
-    }
+    this.socket?.send(JSON.stringify(payload));
   },
 
   disconnect() {
-    socket?.close();
-    socket = null;
+    this.socket?.close();
+    this.socket = null;
   }
 };
 
