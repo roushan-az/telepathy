@@ -13,10 +13,15 @@ import {
   createAnswer,
   setRemoteAnswer,
   addIceCandidate,
-  closeConnection
+  closeConnection,
+  createDataChannel,
+  setupDataChannelForReceiver,
+  handleIncomingData
 } from "./services/webrtc";
 
 function App() {
+  const [dataReady, setDataReady] = useState(false);
+  
   /* -------------------- USER -------------------- */
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
@@ -29,19 +34,18 @@ function App() {
   const [chats, setChats] = useState([]);
   const [selectedChatId, setSelectedChatId] = useState(null);
   
-  // Keep a ref to chats for immediate access in callbacks
   const chatsRef = useRef([]);
   useEffect(() => {
     chatsRef.current = chats;
   }, [chats]);
 
-  // Derive selectedChat from chats array to always have latest version
   const selectedChat = chats.find(c => c.id === selectedChatId) || chats[0];
 
   /* -------------------- WebRTC -------------------- */
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [inCall, setInCall] = useState(false);
+  const [dataOnlyMode, setDataOnlyMode] = useState(false);
 
   const wsConnectedRef = useRef(false);
   const handlersRegisteredRef = useRef(false);
@@ -76,7 +80,6 @@ function App() {
       setUser({ id: storedUserId, name: userParam === "alice" ? "Alice" : "Bob" });
       setToken(storedToken);
 
-      // Setup peer based on URL parameter
       if (userParam === "alice") {
         const bobUserId = localStorage.getItem("userId_bob");
         if (bobUserId) {
@@ -99,7 +102,7 @@ function App() {
   useEffect(() => {
     if (!user || !peerUserId) return;
 
-    console.log(`📱 Setting up chat: ${user.name} → ${peerName} (${peerUserId})`);
+    console.log(`💬 Setting up chat: ${user.name} → ${peerName} (${peerUserId})`);
 
     const defaultChat = {
       id: "chat-1",
@@ -131,24 +134,53 @@ function App() {
     };
   }, [token]);
 
-  /* -------------------- WEBSOCKET HANDLERS (ONCE) -------------------- */
+  /* -------------------- FILE RECEIVED -------------------- */
+  const handleFileReceived = useCallback((file) => {
+    console.log("📥 File received:", file.name);
+
+    const fileMessage = {
+      id: crypto.randomUUID(),
+      senderId: peerUserId,
+      type: "file",
+      fileName: file.name,
+      fileUrl: file.url,
+      mime: file.mime,
+      fileSize: file.size,
+      timestamp: new Date(),
+      status: "delivered"
+    };
+
+    setChats(prev =>
+      prev.map(chat => {
+        // Add to the chat with the peer who sent it
+        if (chat.peerId === peerUserId) {
+          return {
+            ...chat,
+            messages: [...chat.messages, fileMessage],
+            lastMessage: `📎 ${file.name}`,
+            lastTimestamp: new Date()
+          };
+        }
+        return chat;
+      })
+    );
+  }, [peerUserId]);
+
+  /* -------------------- WEBSOCKET HANDLERS -------------------- */
   const handleIncomingMessage = useCallback((msg) => {
-    // Try to get sender from message fields
     let senderId = msg.from || msg.senderId || msg.sender || msg.userId;
     
-    // If backend doesn't include 'from', infer from 'to' field using chatsRef
     if (!senderId && msg.to) {
       const chat = chatsRef.current.find(c => c.participants?.includes(msg.to));
       if (chat?.peerId) {
         senderId = chat.peerId;
-        console.log(`🔄 Inferred sender from peer: ${senderId}`);
       }
     }
     
     console.log(`📥 Received message from ${senderId}:`, msg.payload?.content);
 
     if (!senderId) {
-      console.error("❌ Cannot determine sender ID from message:", msg);
+      console.error("❌ Cannot determine sender ID");
       return;
     }
 
@@ -168,20 +200,25 @@ function App() {
               messages: [...chat.messages, incoming],
               lastMessage: incoming.content,
               lastTimestamp: new Date(),
-              unreadCount: 0
+              unreadCount: chat.id === selectedChatId ? 0 : chat.unreadCount + 1
             }
           : chat
       )
     );
-  }, []);
+  }, [selectedChatId]);
 
   const handleOffer = useCallback(async (msg) => {
     console.log(`📞 Received OFFER from ${msg.from}`);
-    setInCall(true);
+    
+    const isDataOnly = msg.dataOnly === true;
+    setDataOnlyMode(isDataOnly);
+    
+    if (!isDataOnly) {
+      setInCall(true);
+    }
 
     await createPeerConnection(
       (candidate) => {
-        console.log("🧊 Sending ICE candidate");
         WebSocketService.send({
           type: "ICE",
           to: msg.from,
@@ -194,18 +231,30 @@ function App() {
       }
     );
 
-    const stream = await getUserMedia(true, true);
-    setLocalStream(stream);
-    addTracks();
+    // Setup data channel for receiver
+    setupDataChannelForReceiver(
+      (data) => handleIncomingData(data, handleFileReceived),
+      () => {
+        console.log("✅ DataChannel ready (receiver)");
+        setDataReady(true);
+      }
+    );
+
+    // Only get media if not data-only mode
+    if (!isDataOnly) {
+      const stream = await getUserMedia(true, true);
+      setLocalStream(stream);
+      addTracks();
+    }
 
     const answer = await createAnswer(msg.offer);
-    console.log("📤 Sending ANSWER");
     WebSocketService.send({
       type: "ANSWER",
       to: msg.from,
-      answer
+      answer,
+      dataOnly: isDataOnly
     });
-  }, []);
+  }, [handleFileReceived]);
 
   const handleAnswer = useCallback(async (msg) => {
     console.log(`✅ Received ANSWER from ${msg.from}`);
@@ -222,85 +271,145 @@ function App() {
   useEffect(() => {
     if (!user || handlersRegisteredRef.current) return;
 
-    console.log("📌 Registering WebSocket handlers");
+    console.log("🔌 Registering WebSocket handlers");
     WebSocketService.on("MESSAGE", handleIncomingMessage);
     WebSocketService.on("OFFER", handleOffer);
     WebSocketService.on("ANSWER", handleAnswer);
     WebSocketService.on("ICE", handleIce);
     
     handlersRegisteredRef.current = true;
-
-    return () => {
-      console.log("🧹 Cleanup: handlers stay registered (singleton pattern)");
-    };
   }, [user, handleIncomingMessage, handleOffer, handleAnswer, handleIce]);
 
   /* -------------------- MESSAGING -------------------- */
-  const handleSendMessage = (text) => {
+  const handleSendMessage = (text, isFileMessage = false) => {
     if (!selectedChat || !user) return;
 
-    const message = {
-      id: crypto.randomUUID(),
-      senderId: user.id,
-      content: text,
-      timestamp: new Date(),
-      status: "sending",
-      chatId: selectedChat.id
-    };
+    let message;
+    
+    if (isFileMessage) {
+      // text is actually a file message object
+      message = {
+        ...text,
+        chatId: selectedChat.id
+      };
+    } else {
+      // Regular text message
+      message = {
+        id: crypto.randomUUID(),
+        senderId: user.id,
+        content: text,
+        timestamp: new Date(),
+        status: "sending",
+        chatId: selectedChat.id
+      };
+    }
 
-    console.log(`📤 Sending to ${selectedChat.peerId}: "${text}"`);
-
-    // Update UI immediately
     setChats(prev =>
       prev.map(chat =>
         chat.id === selectedChat.id
           ? {
               ...chat,
               messages: [...chat.messages, message],
-              lastMessage: text,
+              lastMessage: isFileMessage ? `📎 ${message.fileName}` : text,
               lastTimestamp: new Date()
             }
           : chat
       )
     );
 
-    // Send via WebSocket
-    WebSocketService.send({
-      type: "MESSAGE",
-      to: selectedChat.peerId,
-      payload: {
-        content: text,
-        messageId: message.id
-      }
-    });
+    // Only send text messages via WebSocket (files go via WebRTC DataChannel)
+    if (!isFileMessage) {
+      WebSocketService.send({
+        type: "MESSAGE",
+        to: selectedChat.peerId,
+        payload: {
+          content: text,
+          messageId: message.id
+        }
+      });
 
-    // Update status to "sent"
-    setTimeout(() => {
-      setChats(prev =>
-        prev.map(chat =>
-          chat.id === selectedChat.id
-            ? {
-                ...chat,
-                messages: chat.messages.map(msg =>
-                  msg.id === message.id ? { ...msg, status: "sent" } : msg
-                )
-              }
-            : chat
-        )
-      );
-    }, 100);
+      setTimeout(() => {
+        setChats(prev =>
+          prev.map(chat =>
+            chat.id === selectedChat.id
+              ? {
+                  ...chat,
+                  messages: chat.messages.map(msg =>
+                    msg.id === message.id ? { ...msg, status: "sent" } : msg
+                  )
+                }
+              : chat
+          )
+        );
+      }, 100);
+    } else {
+      // Update file message status to sent after a short delay
+      setTimeout(() => {
+        setChats(prev =>
+          prev.map(chat =>
+            chat.id === selectedChat.id
+              ? {
+                  ...chat,
+                  messages: chat.messages.map(msg =>
+                    msg.id === message.id ? { ...msg, status: "sent" } : msg
+                  )
+                }
+              : chat
+          )
+        );
+      }, 500);
+    }
   };
 
-  /* -------------------- WEBRTC CALL INITIATOR -------------------- */
+  /* -------------------- DATA-ONLY CONNECTION -------------------- */
+  const initiateDataConnection = async () => {
+    if (!selectedChat) return;
+    
+    console.log(`🔗 Starting data-only connection for file transfer`);
+    setDataOnlyMode(true);
+
+    await createPeerConnection(
+      (candidate) => {
+        WebSocketService.send({
+          type: "ICE",
+          to: selectedChat.peerId,
+          candidate
+        });
+      },
+      (stream) => {
+        console.log("📺 Received remote stream");
+        setRemoteStream(stream);
+      }
+    );
+
+    // Create data channel for file transfer
+    createDataChannel(
+      (data) => handleIncomingData(data, handleFileReceived),
+      () => {
+        console.log("✅ DataChannel ready (caller)");
+        setDataReady(true);
+      }
+    );
+    
+    const offer = await createOffer();
+    WebSocketService.send({
+      type: "OFFER",
+      to: selectedChat.peerId,
+      offer,
+      dataOnly: true
+    });
+  };
+
+  /* -------------------- WEBRTC CALL -------------------- */
   const startCall = async (video = false) => {
     if (!selectedChat) return;
     
     console.log(`📞 Starting ${video ? 'video' : 'audio'} call`);
     setInCall(true);
+    setDataOnlyMode(false);
 
     await createPeerConnection(
       (candidate) => {
-        console.log("🧊 Sending ICE candidate");
         WebSocketService.send({
           type: "ICE",
           to: selectedChat.peerId,
@@ -317,21 +426,32 @@ function App() {
     setLocalStream(stream);
     addTracks();
 
+    // Create data channel for file transfer
+    createDataChannel(
+      (data) => handleIncomingData(data, handleFileReceived),
+      () => {
+        console.log("✅ DataChannel ready (caller)");
+        setDataReady(true);
+      }
+    );
+    
     const offer = await createOffer();
-    console.log("📤 Sending OFFER");
     WebSocketService.send({
       type: "OFFER",
       to: selectedChat.peerId,
-      offer
+      offer,
+      dataOnly: false
     });
   };
 
   const endCall = () => {
-    console.log("📴 Ending call");
+    console.log("🔴 Ending call");
     closeConnection();
     setLocalStream(null);
     setRemoteStream(null);
     setInCall(false);
+    setDataOnlyMode(false);
+    setDataReady(false);
   };
 
   /* -------------------- UI -------------------- */
@@ -399,12 +519,12 @@ function App() {
           onSendMessage={handleSendMessage}
           onCall={handleCall}
           inCall={inCall}
-          startCall={startCall}
+          dataReady={dataReady}
           endCall={endCall}
+          onInitiateDataConnection={initiateDataConnection}
         />
       </div>
 
-      {/* Video streams */}
       {localStream && (
         <video
           className="local-video"
