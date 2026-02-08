@@ -17,6 +17,8 @@ import {
 } from "./services/webrtc";
 
 function App() {
+
+  const demoChannel = new BroadcastChannel("telepathy-demo");
   /* -------------------- USER -------------------- */
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
@@ -27,13 +29,31 @@ function App() {
       bob: { id: "user-2", name: "Bob" }
     };
 
-    function getDemoUser() {
-      const params = new URLSearchParams(window.location.search);
-      const key = params.get("user") || "alice";
-      return DEMO_USERS[key] || DEMO_USERS.alice;
+  const getDemoUser = () => {
+    // Always check URL parameters first
+    const params = new URLSearchParams(window.location.search);
+    const urlKey = params.get("user");
+    
+    // If URL has a user parameter, use that and update localStorage
+    if (urlKey) {
+      const user = DEMO_USERS[urlKey] || DEMO_USERS.alice;
+      localStorage.setItem("demoUser", JSON.stringify(user));
+      return user;
     }
-
-   const [currentUser] = useState(getDemoUser());
+    
+    // If no URL parameter, check localStorage
+    const saved = localStorage.getItem("demoUser");
+    if (saved && saved !== "undefined" && saved !== "null") {
+      return JSON.parse(saved);
+    }
+    
+    // Default to alice
+    const defaultUser = DEMO_USERS.alice;
+    localStorage.setItem("demoUser", JSON.stringify(defaultUser));
+    return defaultUser;
+  };  
+    
+  const [currentUser] = useState(getDemoUser());
 
   /* -------------------- CHATS -------------------- */
   const [chats, setChats] = useState([
@@ -135,27 +155,31 @@ function App() {
   }, [token]);
 
   /* -------------------- MESSAGING -------------------- */
- const handleSendMessage = (text) => {
-  const message = {
-    id: crypto.randomUUID(),
-    senderId: currentUser.id,
-    content: text,
-    timestamp: new Date(),
-    status: "sent"
+  const handleSendMessage = (text) => {
+    if (!selectedChat) return;
+
+    const message = {
+      id: crypto.randomUUID(),
+      senderId: currentUser.id,
+      content: text,
+      timestamp: new Date(),
+      status: "sent",
+      chatId: selectedChat.id
+    };
+
+    // 1️⃣ Update my UI
+    setChats(prev =>
+      prev.map(chat =>
+        chat.id === selectedChat.id
+          ? { ...chat, messages: [...chat.messages, message] }
+          : chat
+      )
+    );
+
+    // 2️⃣ Broadcast to other tab
+    demoChannel.postMessage(message);
   };
 
-  // update local UI
-  setChats(prev =>
-    prev.map(chat =>
-      chat.id === "chat-1"
-        ? { ...chat, messages: [...chat.messages, message] }
-        : chat
-    )
-  );
-
-  // notify other tab
-  broadcastMessage(message);
-};
 
   const handleIncomingMessage = (msg) => {
     const incoming = {
@@ -174,6 +198,26 @@ function App() {
       )
     );
   };
+
+  useEffect(() => {
+  demoChannel.onmessage = (event) => {
+    const msg = event.data;
+
+    // ignore my own messages
+    if (msg.senderId === currentUser.id) return;
+
+    setChats(prev =>
+      prev.map(chat =>
+        chat.id === msg.chatId
+          ? { ...chat, messages: [...chat.messages, msg] }
+          : chat
+      )
+    );
+  };
+
+  return () => demoChannel.close();
+}, [currentUser.id]);
+
 
   /* -------------------- WEBRTC -------------------- */
   const startCall = async (video = false) => {
