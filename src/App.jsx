@@ -1,209 +1,197 @@
-import { useState, useEffect } from 'react';
-import Sidebar from './components/Sidebar';
-import ChatWindow from './components/ChatWindow';
-import ApiService from './services/api';
-import WebSocketService from './services/websocket';
-import './App.css';
+import { useEffect, useRef, useState } from "react";
+import ChatWindow from "./components/ChatWindow.jsx";
+import Sidebar from "./components/Sidebar.jsx";
+import "./App.css";
+import WebSocketService from "./services/websocket";
+
+// WebRTC helpers
+import {
+  createPeerConnection,
+  getUserMedia,
+  addTracks,
+  createOffer,
+  createAnswer,
+  setRemoteAnswer,
+  addIceCandidate,
+  closeConnection
+} from "./services/webrtc";
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
   const [selectedChat, setSelectedChat] = useState(null);
-  const [chats, setChats] = useState([]);
   const [messages, setMessages] = useState([]);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [chats, setChats] = useState([]);
 
+  const wsConnectedRef = useRef(false);
+
+  // WebRTC state
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [inCall, setInCall] = useState(false);
+
+  /* -------------------- Bootstrap Auth -------------------- */
   useEffect(() => {
-    initializeApp();
-  }, []);
+    const bootstrap = async () => {
+      let storedToken = localStorage.getItem("token");
+      let storedUserId = localStorage.getItem("userId");
 
-  const initializeApp = async () => {
-    try {
-      // Mock user for UI demonstration
-      const mockUser = {
-        id: '1',
-        name: 'John Doe',
-        phone: '+1 234 567 8900',
-        avatar: null,
-        status: 'Hey there! I am using Premium Chat'
-      };
-      
-      setCurrentUser(mockUser);
-
-      // Mock chats data
-      const mockChats = [
-        {
-          id: '1',
-          name: 'Alice Cooper',
-          avatar: null,
-          lastMessage: 'Hey! How are you doing?',
-          timestamp: new Date(Date.now() - 1000 * 60 * 5),
-          unreadCount: 2,
-          online: true
-        },
-        {
-          id: '2',
-          name: 'Bob Smith',
-          avatar: null,
-          lastMessage: 'Thanks for the update!',
-          timestamp: new Date(Date.now() - 1000 * 60 * 30),
-          unreadCount: 0,
-          online: false
-        },
-        {
-          id: '3',
-          name: 'Developer Team',
-          avatar: null,
-          lastMessage: 'Sprint planning tomorrow',
-          timestamp: new Date(Date.now() - 1000 * 60 * 60 * 2),
-          unreadCount: 5,
-          online: true
-        },
-        {
-          id: '4',
-          name: 'Sarah Johnson',
-          avatar: null,
-          lastMessage: 'See you later!',
-          timestamp: new Date(Date.now() - 1000 * 60 * 60 * 24),
-          unreadCount: 0,
-          online: false
-        }
-      ];
-
-      setChats(mockChats);
-
-      // Initialize WebSocket connection (will fail gracefully without backend)
-      try {
-        WebSocketService.connect(mockUser.id);
-        
-        WebSocketService.on('message', (message) => {
-          handleNewMessage(message);
+      if (!storedToken) {
+        const res = await fetch("http://localhost:8080/api/auth/anonymous", {
+          method: "POST"
         });
-      } catch (error) {
-        console.log('WebSocket connection pending backend setup');
+        const data = await res.json();
+
+        storedToken = data.accessToken;
+        storedUserId = data.user.userId;
+
+        localStorage.setItem("token", storedToken);
+        localStorage.setItem("userId", storedUserId);
+
+        setUser(data.user);
+        setToken(storedToken);
+      } else {
+        setUser({ userId: storedUserId, name: "Anonymous" });
+        setToken(storedToken);
       }
-
-      setIsLoading(false);
-    } catch (error) {
-      console.error('Error initializing app:', error);
-      setIsLoading(false);
-    }
-  };
-
-  const handleNewMessage = (message) => {
-    if (selectedChat && message.chatId === selectedChat.id) {
-      setMessages(prev => [...prev, message]);
-    }
-    
-    // Update chat preview
-    setChats(prev => prev.map(chat => 
-      chat.id === message.chatId 
-        ? { ...chat, lastMessage: message.content, timestamp: new Date(message.timestamp) }
-        : chat
-    ));
-  };
-
-  const handleChatSelect = (chat) => {
-    setSelectedChat(chat);
-    
-    // Mock messages for selected chat
-    const mockMessages = [
-      {
-        id: '1',
-        senderId: chat.id,
-        content: 'Hello! How are you?',
-        timestamp: new Date(Date.now() - 1000 * 60 * 60),
-        status: 'read'
-      },
-      {
-        id: '2',
-        senderId: currentUser.id,
-        content: 'Hi! I\'m doing great, thanks for asking!',
-        timestamp: new Date(Date.now() - 1000 * 60 * 55),
-        status: 'read'
-      },
-      {
-        id: '3',
-        senderId: chat.id,
-        content: 'That\'s wonderful to hear!',
-        timestamp: new Date(Date.now() - 1000 * 60 * 50),
-        status: 'read'
-      },
-      {
-        id: '4',
-        senderId: currentUser.id,
-        content: 'How about you? What have you been up to?',
-        timestamp: new Date(Date.now() - 1000 * 60 * 45),
-        status: 'read'
-      },
-      {
-        id: '5',
-        senderId: chat.id,
-        content: chat.lastMessage,
-        timestamp: chat.timestamp,
-        status: 'delivered'
-      }
-    ];
-    
-    setMessages(mockMessages);
-  };
-
-  const handleSendMessage = async (content) => {
-    if (!selectedChat || !content.trim()) return;
-
-    const newMessage = {
-      id: Date.now().toString(),
-      senderId: currentUser.id,
-      chatId: selectedChat.id,
-      content: content.trim(),
-      timestamp: new Date(),
-      status: 'sending'
     };
 
-    // Optimistically add message
-    setMessages(prev => [...prev, newMessage]);
+    bootstrap();
+  }, []);
 
-    try {
-      // Send via WebSocket (will queue when backend is ready)
-      WebSocketService.sendMessage({
-        chatId: selectedChat.id,
-        content: content.trim()
-      });
+  /* -------------------- WebSocket (SINGLE SOURCE OF TRUTH) -------------------- */
+  useEffect(() => {
+    if (!token) return;
+    if (wsConnectedRef.current) return;
 
-      // Update message status
-      setMessages(prev => prev.map(msg => 
-        msg.id === newMessage.id ? { ...msg, status: 'sent' } : msg
-      ));
-    } catch (error) {
-      console.error('Error sending message:', error);
-      setMessages(prev => prev.map(msg => 
-        msg.id === newMessage.id ? { ...msg, status: 'failed' } : msg
-      ));
+    wsConnectedRef.current = true;
+    WebSocketService.connect(token);
+
+    WebSocketService.on("MESSAGE", handleIncomingMessage);
+    WebSocketService.on("OFFER", handleOffer);
+    WebSocketService.on("ANSWER", handleAnswer);
+    WebSocketService.on("ICE", handleIce);
+
+    return () => {
+      wsConnectedRef.current = false;
+      WebSocketService.disconnect();
+    };
+  }, [token]);
+
+  /* -------------------- Messaging -------------------- */
+  const handleIncomingMessage = (msg) => {
+    setMessages((prev) => [...prev, msg]);
+  };
+
+  const sendMessage = (text) => {
+    if (!selectedChat) return;
+
+    WebSocketService.send({
+      type: "MESSAGE",
+      to: selectedChat.id,
+      payload: text
+    });
+  };
+
+  /* -------------------- WebRTC -------------------- */
+  const startCall = async (video = false) => {
+    if (!selectedChat) return;
+    setInCall(true);
+
+    await createPeerConnection(
+      (candidate) =>
+        WebSocketService.send({
+          type: "ICE",
+          to: selectedChat.id,
+          candidate
+        }),
+      (stream) => setRemoteStream(stream)
+    );
+
+    const stream = await getUserMedia(true, video);
+    setLocalStream(stream);
+    addTracks();
+
+    const offer = await createOffer();
+    WebSocketService.send({
+      type: "OFFER",
+      to: selectedChat.id,
+      offer
+    });
+  };
+
+  const handleOffer = async (msg) => {
+    setInCall(true);
+
+    await createPeerConnection(
+      (candidate) =>
+        WebSocketService.send({
+          type: "ICE",
+          to: msg.from,
+          candidate
+        }),
+      (stream) => setRemoteStream(stream)
+    );
+
+    const stream = await getUserMedia(true, true);
+    setLocalStream(stream);
+    addTracks();
+
+    const answer = await createAnswer(msg.offer);
+    WebSocketService.send({
+      type: "ANSWER",
+      to: msg.from,
+      answer
+    });
+  };
+
+  const handleAnswer = async (msg) => {
+    await setRemoteAnswer(msg.answer);
+  };
+
+  const handleIce = async (msg) => {
+    if (msg?.candidate) {
+      await addIceCandidate(msg.candidate);
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="loading-screen">
-        <div className="loading-spinner"></div>
-        <p>Loading Premium Chat...</p>
-      </div>
-    );
+  const endCall = () => {
+    closeConnection();
+    setLocalStream(null);
+    setRemoteStream(null);
+    setInCall(false);
+  };
+
+  /* -------------------- UI -------------------- */
+  if (!user || !token) {
+    return <div className="init-screen">Initializing secure session…</div>;
   }
 
   return (
-    <div className="app">
-      <Sidebar 
+    <div className="app-container">
+      <Sidebar
+        user={user}
         chats={chats}
+        onSelectChat={setSelectedChat}
         selectedChat={selectedChat}
-        onChatSelect={handleChatSelect}
-        currentUser={currentUser}
       />
-      <ChatWindow 
-        chat={selectedChat}
+
+      <ChatWindow
         messages={messages}
-        currentUser={currentUser}
-        onSendMessage={handleSendMessage}
+        onSend={sendMessage}
+        onCallAudio={() => startCall(false)}
+        onCallVideo={() => startCall(true)}
+        inCall={inCall}
+        onEndCall={endCall}
       />
+
+      {localStream && (
+        <video autoPlay muted playsInline ref={(v) => v && (v.srcObject = localStream)} />
+      )}
+
+      {remoteStream && (
+        <video autoPlay playsInline ref={(v) => v && (v.srcObject = remoteStream)} />
+      )}
     </div>
   );
 }

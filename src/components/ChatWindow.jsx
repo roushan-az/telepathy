@@ -189,6 +189,14 @@ function ChatWindow({ chat, messages, currentUser, onSendMessage }) {
         <button className="icon-button" title="Emoji">
           <Smile size={20} />
         </button>
+        {inCall && (
+  <div className="call-controls">
+    <button onClick={handleMute}>🎙️</button>
+    <button onClick={handleCamera}>📷</button>
+    <button onClick={handleSwitchCamera}>🔄</button>
+    <button onClick={endCall}>❌</button>
+  </div>
+)}
 
         <button 
           className={`send-button ${messageInput.trim() ? 'active' : ''}`}
@@ -198,6 +206,8 @@ function ChatWindow({ chat, messages, currentUser, onSendMessage }) {
         >
           <Send size={20} />
         </button>
+        <button onClick={() => startCall(false)}>📞</button>
+<button onClick={() => startCall(true)}>🎥</button>
       </div>
     </div>
   );
