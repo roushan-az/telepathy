@@ -16,8 +16,12 @@ import {
   closeConnection,
   createDataChannel,
   setupDataChannelForReceiver,
-  handleIncomingData
+  handleIncomingData,
+  toggleMute,
+  toggleCamera,
+  switchCamera
 } from "./services/webrtc";
+import CallScreen from "./components/Callscreen .jsx";
 
 function App() {
   const [dataReady, setDataReady] = useState(false);
@@ -53,11 +57,35 @@ function App() {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [connectionQuality, setConnectionQuality] = useState('good');
   const [pendingIceCandidates, setPendingIceCandidates] = useState([]);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
 
   const wsConnectedRef = useRef(false);
   const handlersRegisteredRef = useRef(false);
   const peerConnectionRef = useRef(null);
   const currentPeerIdRef = useRef(null);
+  const callDurationIntervalRef = useRef(null);
+
+  /* -------------------- CALL DURATION TRACKING -------------------- */
+  useEffect(() => {
+    if (inCall && callStartTime) {
+      callDurationIntervalRef.current = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
+        setCallDuration(elapsed);
+      }, 1000);
+    } else {
+      if (callDurationIntervalRef.current) {
+        clearInterval(callDurationIntervalRef.current);
+        callDurationIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (callDurationIntervalRef.current) {
+        clearInterval(callDurationIntervalRef.current);
+      }
+    };
+  }, [inCall, callStartTime]);
 
   /* -------------------- BOOTSTRAP AUTH -------------------- */
   useEffect(() => {
@@ -628,6 +656,31 @@ function App() {
     setInCall(false);
     setDataOnlyMode(false);
     setDataReady(false);
+    setIsVideoCall(false);
+    setCallStartTime(null);
+    setCallDuration(0);
+    setIsMuted(false);
+    setIsVideoOff(false);
+    setIsReconnecting(false);
+    if (callDurationIntervalRef.current) {
+      clearInterval(callDurationIntervalRef.current);
+      callDurationIntervalRef.current = null;
+    }
+  };
+
+  /* -------------------- MEDIA CONTROLS -------------------- */
+  const handleToggleMute = () => {
+    const muted = toggleMute();
+    setIsMuted(muted);
+  };
+
+  const handleToggleVideo = () => {
+    const videoOff = toggleCamera();
+    setIsVideoOff(videoOff);
+  };
+
+  const handleSwitchCamera = async () => {
+    await switchCamera();
   };
 
   /* -------------------- UI -------------------- */
@@ -715,22 +768,22 @@ function App() {
         />
       </div>
 
-      {localStream && (
-        <video
-          className="local-video"
-          autoPlay
-          muted
-          playsInline
-          ref={(v) => v && (v.srcObject = localStream)}
-        />
-      )}
-
-      {remoteStream && (
-        <video
-          className="remote-video"
-          autoPlay
-          playsInline
-          ref={(v) => v && (v.srcObject = remoteStream)}
+      {/* Call Screen Overlay */}
+      {inCall && !dataOnlyMode && (
+        <CallScreen
+          localStream={localStream}
+          remoteStream={remoteStream}
+          peerName={selectedChat?.name || "Unknown"}
+          isVideoCall={isVideoCall}
+          onEndCall={endCall}
+          onToggleMute={handleToggleMute}
+          onToggleVideo={handleToggleVideo}
+          onSwitchCamera={handleSwitchCamera}
+          isMuted={isMuted}
+          isVideoOff={isVideoOff}
+          callDuration={callDuration}
+          connectionQuality={connectionQuality}
+          isReconnecting={isReconnecting}
         />
       )}
     </div>
