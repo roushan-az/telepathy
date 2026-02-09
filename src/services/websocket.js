@@ -200,7 +200,7 @@ class WebSocketService {
    */
   sendTextMessage(recipientId, content) {
     return this.send({
-      type: 'text',
+      type: 'TEXT',  // ✅ Changed to uppercase to match handler
       to: recipientId,
       content: content,
       timestamp: Date.now()
